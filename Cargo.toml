@@ -1,8 +1,10 @@
 [workspace]
+resolver = "2"
 members = [
   "helix-core",
   "helix-view",
   "helix-term",
+  "helix-egui",
   "helix-tui",
   "helix-syntax",
   "helix-lsp",
