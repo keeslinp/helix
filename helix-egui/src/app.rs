@@ -1,7 +1,7 @@
-use egui::{Color32, Frame, Layout, Ui, Vec2};
+use egui::{Color32, Frame, Layout, Ui, Vec2, Widget};
 use helix_core::{merge_toml_values, syntax};
 use helix_lsp::{lsp, util::lsp_pos_to_pos, LspProgressMap};
-use helix_view::{editor::Action, graphics::Rect, theme, Editor};
+use helix_view::{editor::Action, graphics::Rect, theme, Document, Editor, View};
 use serde_json::json;
 
 use anyhow::Result;
@@ -11,7 +11,7 @@ pub struct Application {
 }
 
 impl Application {
-    pub fn new(width: f32, height: f32, ctx: &egui::CtxRef) -> Result<Application> {
+    pub fn new() -> Result<Application> {
         let conf_dir = helix_core::config_dir();
 
         let theme_loader =
@@ -59,52 +59,95 @@ impl Application {
 
     pub fn render(self: &mut Application, ui: &mut Ui) {
         egui::CentralPanel::default().show(ui.ctx(), |ui| {
-            self.editor.resize(Rect::new(
-                0,
-                0,
-                (ui.available_width() as f32
-                    / ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm'))
-                .floor() as u16,
-                (ui.available_height() as f32 / ui.fonts().row_height(egui::TextStyle::Monospace))
-                    .floor() as u16,
-            ));
-            ui.with_layout(Layout::left_to_right(), |ui| {
-                for (view, focused) in self.editor.tree.views() {
-                    let doc = self.editor.document(view.doc).unwrap();
-                    ui.with_layout(Layout::top_down(egui::Align::Min), |ui| {
-                        if focused {
-                            Frame::default()
-                                .stroke(egui::Stroke {
-                                    width: 1.,
-                                    color: Color32::WHITE,
-                                })
-                                .margin((4., 4.))
-                        } else {
-                            Frame::default()
-                        }
-                        .show(ui, |ui| {
-                            ui.set_width(
-                                view.inner_area().width as f32
-                                    * ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm'),
-                            );
-                            ui.set_height(
-                                view.inner_area().height as f32
-                                    * ui.fonts().row_height(egui::TextStyle::Monospace),
-                            );
-                            for chunk in doc.text().chunks() {
-                                ui.label(chunk);
-                            }
-                            ui.with_layout(Layout::bottom_up(egui::Align::Max), |ui| {
-                                ui.label(match doc.mode() {
-                                    helix_view::document::Mode::Normal => "NOR",
-                                    helix_view::document::Mode::Select => "SEL",
-                                    helix_view::document::Mode::Insert => "INS",
-                                });
-                            });
-                        });
-                    });
-                }
+            ui.add(EditorWidget {
+                editor: &mut self.editor,
             });
         });
+    }
+}
+
+struct EditorWidget<'a> {
+    editor: &'a mut Editor,
+}
+
+impl<'a> Widget for EditorWidget<'a> {
+    fn ui(self, ui: &mut Ui) -> egui::Response {
+        self.editor.resize(Rect::new(
+            0,
+            0,
+            (ui.available_width() as f32 / ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm'))
+                .floor() as u16,
+            (ui.available_height() as f32 / ui.fonts().row_height(egui::TextStyle::Monospace))
+                .floor() as u16,
+        ));
+        ui.with_layout(Layout::left_to_right(), |ui| {
+            for (view, focused) in self.editor.tree.views() {
+                ui.add(ViewWidget {
+                    view,
+                    focused,
+                    editor: self.editor,
+                });
+            }
+        })
+        .response
+    }
+}
+
+struct ViewWidget<'a> {
+    view: &'a View,
+    focused: bool,
+    editor: &'a Editor,
+}
+
+impl<'a> Widget for ViewWidget<'a> {
+    fn ui(self, ui: &mut Ui) -> egui::Response {
+        let doc = self.editor.document(self.view.doc).unwrap();
+        ui.with_layout(Layout::top_down(egui::Align::Min), |ui| {
+            if self.focused {
+                Frame::default()
+                    .stroke(egui::Stroke {
+                        width: 1.,
+                        color: Color32::WHITE,
+                    })
+                    .margin((4., 4.))
+            } else {
+                Frame::default()
+            }
+            .show(ui, |ui| {
+                ui.allocate_ui(
+                    (
+                        self.view.inner_area().width as f32
+                            * ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm'),
+                        self.view.inner_area().height as f32
+                            * ui.fonts().row_height(egui::TextStyle::Monospace),
+                    )
+                        .into(),
+                    |ui| {
+                        ui.add(DocumentWidget { doc });
+                    },
+                );
+                ui.with_layout(Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.label(match doc.mode() {
+                        helix_view::document::Mode::Normal => "NOR",
+                        helix_view::document::Mode::Select => "SEL",
+                        helix_view::document::Mode::Insert => "INS",
+                    });
+                });
+            });
+        })
+        .response
+    }
+}
+
+struct DocumentWidget<'a> {
+    doc: &'a Document,
+}
+
+impl<'a> Widget for DocumentWidget<'a> {
+    fn ui(self, ui: &mut Ui) -> egui::Response {
+        for chunk in self.doc.text().chunks() {
+            ui.label(chunk);
+        }
+        ui.allocate_response(ui.available_size(), egui::Sense::focusable_noninteractive())
     }
 }

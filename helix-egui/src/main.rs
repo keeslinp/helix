@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     // We use the egui_wgpu_backend crate as the render backend.
     let mut egui_rpass = RenderPass::new(&device, surface_format, 1);
 
-    let mut app = Application::new(size.width as f32, size.height as f32, &platform.context())?;
+    let mut app = Application::new()?;
 
     let start_time = Instant::now();
     let mut previous_frame_time = None;
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
                 // Begin to draw the UI frame.
                 let egui_start = Instant::now();
                 platform.begin_frame();
-                let mut ctx = platform.context();
+                let ctx = platform.context();
 
                 ctx.set_style(egui::Style {
                     override_text_style: Some(egui::TextStyle::Monospace),
