@@ -86,9 +86,11 @@ async fn main() -> Result<()> {
 
     let start_time = Instant::now();
     let mut previous_frame_time = None;
+    let mut dirty = false;
     event_loop.run(move |event, _, control_flow| {
         // Pass the winit events to the platform integration.
         platform.handle_event(&event);
+        *control_flow = ControlFlow::Wait;
 
         match event {
             RedrawRequested(..) => {
@@ -120,6 +122,10 @@ async fn main() -> Result<()> {
                     override_text_style: Some(egui::TextStyle::Monospace),
                     ..Default::default()
                 });
+
+                if previous_frame_time.is_none() {
+                    app.resize(surface_config.width, surface_config.height, ctx.clone());
+                }
 
                 egui::Window::new("My Window")
                     .frame(egui::Frame::window(ctx.style().as_ref()).margin((0., 0.)))
@@ -176,26 +182,35 @@ async fn main() -> Result<()> {
                 // } else {
                 //     *control_flow = ControlFlow::Wait;
                 // }
+                dirty = false;
             }
             MainEventsCleared | UserEvent(Event::RequestRedraw) => {
-                window.request_redraw();
+                if dirty {
+                    window.request_redraw();
+                }
             }
-            WindowEvent { event, .. } => match event {
-                winit::event::WindowEvent::Resized(size) => {
-                    // Resize with 0 width and height is used by winit to signal a minimize event on Windows.
-                    // See: https://github.com/rust-windowing/winit/issues/208
-                    // This solves an issue where the app would panic when minimizing on Windows.
-                    if size.width > 0 && size.height > 0 {
-                        surface_config.width = size.width;
-                        surface_config.height = size.height;
-                        surface.configure(&device, &surface_config);
+            WindowEvent {
+                event: winit::event::WindowEvent::Resized(size),
+                ..
+            } => {
+                // Resize with 0 width and height is used by winit to signal a minimize event on Windows.
+                // See: https://github.com/rust-windowing/winit/issues/208
+                // This solves an issue where the app would panic when minimizing on Windows.
+                if size.width > 0 && size.height > 0 {
+                    surface_config.width = size.width;
+                    surface_config.height = size.height;
+                    surface.configure(&device, &surface_config);
+                    if previous_frame_time.is_some() {
+                        app.resize(size.width, size.height, platform.context());
                     }
                 }
-                winit::event::WindowEvent::CloseRequested => {
-                    *control_flow = ControlFlow::Exit;
-                }
-                _ => {}
-            },
+            }
+            WindowEvent {
+                event: winit::event::WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
             _ => (),
         }
     });

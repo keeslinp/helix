@@ -1,4 +1,4 @@
-use egui::{Color32, Frame, Layout, Pos2, Ui, Vec2, Widget};
+use egui::{Color32, CtxRef, Frame, Layout, Pos2, Ui, Vec2, Widget};
 use helix_core::{
     graphemes::{ensure_grapheme_boundary_next, next_grapheme_boundary, prev_grapheme_boundary},
     merge_toml_values,
@@ -94,6 +94,16 @@ impl Application {
                 });
             });
     }
+
+    pub fn resize(self: &mut Application, width: u32, height: u32, ctx: CtxRef) {
+        self.editor.resize(Rect::new(
+            0,
+            0,
+            (width as f32 / ctx.fonts().glyph_width(egui::TextStyle::Monospace, 'm')).floor()
+                as u16,
+            (height as f32 / ctx.fonts().row_height(egui::TextStyle::Monospace)).floor() as u16,
+        ));
+    }
 }
 
 struct EditorWidget<'a> {
@@ -102,14 +112,6 @@ struct EditorWidget<'a> {
 
 impl<'a> Widget for EditorWidget<'a> {
     fn ui(self, ui: &mut Ui) -> egui::Response {
-        self.editor.resize(Rect::new(
-            0,
-            0,
-            (ui.available_width() as f32 / ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm'))
-                .floor() as u16,
-            (ui.available_height() as f32 / ui.fonts().row_height(egui::TextStyle::Monospace))
-                .floor() as u16,
-        ));
         ui.with_layout(Layout::left_to_right(), |ui| {
             for (view, focused) in self.editor.tree.views() {
                 ui.add(ViewWidget {
