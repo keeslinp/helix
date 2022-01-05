@@ -1,11 +1,16 @@
 use egui::{Color32, Frame, Layout, Pos2, Ui, Vec2, Widget};
 use helix_core::{
-    graphemes::ensure_grapheme_boundary_next,
+    graphemes::{ensure_grapheme_boundary_next, next_grapheme_boundary, prev_grapheme_boundary},
     merge_toml_values,
     syntax::{self, Highlight, HighlightEvent, Loader},
     LineEnding, Position,
 };
-use helix_view::{editor::Action, graphics::Rect, theme, Document, Editor, Theme, View};
+use helix_view::{
+    document::Mode,
+    editor::Action,
+    graphics::{Modifier, Rect},
+    theme, Document, Editor, Theme, View,
+};
 
 use anyhow::Result;
 
@@ -72,11 +77,22 @@ impl Application {
     }
 
     pub fn render(self: &mut Application, ui: &mut Ui) {
-        egui::CentralPanel::default().show(ui.ctx(), |ui| {
-            ui.add(EditorWidget {
-                editor: &mut self.editor,
+        egui::CentralPanel::default()
+            .frame(
+                Frame::default().fill(
+                    self.editor
+                        .theme
+                        .get("ui.background")
+                        .bg
+                        .map(convert_color)
+                        .unwrap_or(Color32::TRANSPARENT),
+                ),
+            )
+            .show(ui.ctx(), |ui| {
+                ui.add(EditorWidget {
+                    editor: &mut self.editor,
+                });
             });
-        });
     }
 }
 
@@ -113,83 +129,85 @@ struct ViewWidget<'a> {
     editor: &'a Editor,
 }
 
-impl<'a> Widget for ViewWidget<'a> {
-    fn ui(self, ui: &mut Ui) -> egui::Response {
+impl<'a> ViewWidget<'a> {
+    fn build_highlights(&'a self) -> Box<dyn Iterator<Item = HighlightEvent> + 'a> {
+        if self.focused {
+            Box::new(syntax::merge(
+                self.build_syntax_highlights(),
+                self.build_selection_highlights(),
+            ))
+        } else {
+            Box::new(self.build_syntax_highlights())
+        }
+    }
+    fn build_selection_highlights(&'a self) -> Vec<(usize, std::ops::Range<usize>)> {
         let doc = self.editor.document(self.view.doc).unwrap();
-        ui.with_layout(Layout::top_down(egui::Align::Min), |ui| {
-            if self.focused {
-                Frame::default()
-                    .stroke(egui::Stroke {
-                        width: 1.,
-                        color: Color32::WHITE,
-                    })
-                    .margin((4., 4.))
-            } else {
-                Frame::default()
-            }
-            .show(ui, |ui| {
-                ui.allocate_ui(
-                    (
-                        self.view.area.width as f32
-                            * ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm'),
-                        self.view.area.height as f32
-                            * ui.fonts().row_height(egui::TextStyle::Monospace),
-                    )
-                        .into(),
-                    |ui| {
-                        ui.add(DocumentWidget {
-                            doc,
-                            offset: self.view.offset,
-                            area: self.view.inner_area(),
-                            loader: &self.editor.syn_loader,
-                            theme: &self.editor.theme,
-                        });
-                    },
-                );
-                ui.with_layout(Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.label(match doc.mode() {
-                        helix_view::document::Mode::Normal => "NOR",
-                        helix_view::document::Mode::Select => "SEL",
-                        helix_view::document::Mode::Insert => "INS",
-                    });
-                });
-            });
-        })
-        .response
-    }
-}
-
-struct DocumentWidget<'a> {
-    doc: &'a Document,
-    offset: Position,
-    area: Rect,
-    loader: &'a Loader,
-    theme: &'a Theme,
-}
-
-fn dumb_log(num: u16) -> u16 {
-    match num {
-        0..=9 => 1,
-        10..=99 => 2,
-        100..=999 => 3,
-        1000..=9999 => 4,
-        _ => unreachable!(), // TODO: make this not suck :)
-    }
-}
-
-impl<'a> DocumentWidget<'a> {
-    fn build_highlights(&'a self) -> impl Iterator<Item = HighlightEvent> + 'a {
-        let Self {
-            doc,
-            loader,
-            theme,
-            offset,
-            ..
-        } = self;
+        let theme = &self.editor.theme;
         let text = doc.text().slice(..);
+        let selection = doc.selection(self.view.id);
+        let primary_idx = selection.primary_index();
+
+        let selection_scope = theme
+            .find_scope_index("ui.selection")
+            .expect("could not find `ui.selection` scope in the theme!");
+        let base_cursor_scope = theme
+            .find_scope_index("ui.cursor")
+            .unwrap_or(selection_scope);
+
+        let cursor_scope = match doc.mode() {
+            Mode::Insert => theme.find_scope_index("ui.cursor.insert"),
+            Mode::Select => theme.find_scope_index("ui.cursor.select"),
+            Mode::Normal => Some(base_cursor_scope),
+        }
+        .unwrap_or(base_cursor_scope);
+
+        let primary_cursor_scope = theme
+            .find_scope_index("ui.cursor.primary")
+            .unwrap_or(cursor_scope);
+        let primary_selection_scope = theme
+            .find_scope_index("ui.selection.primary")
+            .unwrap_or(selection_scope);
+
+        let mut spans: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+        for (i, range) in selection.iter().enumerate() {
+            let (cursor_scope, selection_scope) = if i == primary_idx {
+                (primary_cursor_scope, primary_selection_scope)
+            } else {
+                (cursor_scope, selection_scope)
+            };
+
+            // Special-case: cursor at end of the rope.
+            if range.head == range.anchor && range.head == text.len_chars() {
+                spans.push((cursor_scope, range.head..range.head + 1));
+                continue;
+            }
+
+            let range = range.min_width_1(text);
+            if range.head > range.anchor {
+                // Standard case.
+                let cursor_start = prev_grapheme_boundary(text, range.head);
+                spans.push((selection_scope, range.anchor..cursor_start));
+                spans.push((cursor_scope, cursor_start..range.head));
+            } else {
+                // Reverse case.
+                let cursor_end = next_grapheme_boundary(text, range.head);
+                spans.push((cursor_scope, range.head..cursor_end));
+                spans.push((selection_scope, cursor_end..range.anchor));
+            }
+        }
+
+        spans
+    }
+    fn build_syntax_highlights(&'a self) -> impl Iterator<Item = HighlightEvent> + 'a {
+        let doc = self.editor.document(self.view.doc).unwrap();
+        let theme = &self.editor.theme;
+        let offset = self.view.offset;
+        let loader = &self.editor.syn_loader;
+        let text = doc.text().slice(..);
+        let area = self.view.area;
         let last_line = std::cmp::min(
             // Saturating subs to make it inclusive zero indexing.
-            (offset.row + self.area.height as usize).saturating_sub(1),
+            (offset.row + area.height as usize).saturating_sub(1),
             doc.text().len_lines().saturating_sub(1),
         );
 
@@ -207,21 +225,22 @@ impl<'a> DocumentWidget<'a> {
                 let scopes = theme.scopes();
                 syntax
                     .highlight_iter(text.slice(..), Some(range), None, |language| {
-                        loader.language_configuration_for_injection_string(language)
-                            .and_then(|language_config| {
-                                let config = language_config.highlight_config(scopes)?;
-                                let config_ref = config.as_ref();
-                                // SAFETY: the referenced `HighlightConfiguration` behind
-                                // the `Arc` is guaranteed to remain valid throughout the
-                                // duration of the highlight.
-                                let config_ref = unsafe {
-                                    std::mem::transmute::<
-                                        _,
-                                        &'static syntax::HighlightConfiguration,
-                                    >(config_ref)
-                                };
-                                Some(config_ref)
-                            })
+                        loader
+                                .language_configuration_for_injection_string(language)
+                                .and_then(|language_config| {
+                                    let config = language_config.highlight_config(scopes)?;
+                                    let config_ref = config.as_ref();
+                                    // SAFETY: the referenced `HighlightConfiguration` behind
+                                    // the `Arc` is guaranteed to remain valid throughout the
+                                    // duration of the highlight.
+                                    let config_ref = unsafe {
+                                        std::mem::transmute::<
+                                            _,
+                                            &'static syntax::HighlightConfiguration,
+                                        >(config_ref)
+                                    };
+                                    Some(config_ref)
+                                })
                     })
                     .map(|event| event.unwrap())
                     .collect() // TODO: we collect here to avoid holding the lock, fix later
@@ -243,6 +262,68 @@ impl<'a> DocumentWidget<'a> {
         })
     }
 }
+
+impl<'a> Widget for ViewWidget<'a> {
+    fn ui(self, ui: &mut Ui) -> egui::Response {
+        let doc = self.editor.document(self.view.doc).unwrap();
+        ui.with_layout(Layout::top_down(egui::Align::Min), |ui| {
+            let width = self.view.area.width as f32
+                * ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm');
+            ui.set_width(width);
+            ui.set_height(
+                self.view.area.height as f32 * ui.fonts().row_height(egui::TextStyle::Monospace),
+            );
+            ui.add(DocumentWidget {
+                doc,
+                offset: self.view.offset,
+                area: self.view.inner_area(),
+                theme: &self.editor.theme,
+                highlights: self.build_highlights(),
+            });
+            let base_style = if self.focused {
+                self.editor.theme.get("ui.statusline")
+            } else {
+                self.editor.theme.get("ui.statusline.inactive")
+            };
+            Frame::default()
+                .fill(base_style.bg.map(convert_color).unwrap_or(Color32::BLUE))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.with_layout(Layout::bottom_up(egui::Align::Min), |ui| {
+                        ui.colored_label(
+                            base_style.fg.map(convert_color).unwrap_or(Color32::WHITE),
+                            match doc.mode() {
+                                helix_view::document::Mode::Normal => "NOR",
+                                helix_view::document::Mode::Select => "SEL",
+                                helix_view::document::Mode::Insert => "INS",
+                            },
+                        );
+                    });
+                });
+        })
+        .response
+    }
+}
+
+struct DocumentWidget<'a> {
+    doc: &'a Document,
+    offset: Position,
+    area: Rect,
+    theme: &'a Theme,
+    highlights: Box<dyn Iterator<Item = HighlightEvent> + 'a>,
+}
+
+fn dumb_log(num: u16) -> u16 {
+    match num {
+        0..=9 => 1,
+        10..=99 => 2,
+        100..=999 => 3,
+        1000..=9999 => 4,
+        _ => unreachable!(), // TODO: make this not suck :)
+    }
+}
+
+impl<'a> DocumentWidget<'a> {}
 
 fn get_grapheme_index(val: &str, index: usize) -> usize {
     val.char_indices()
@@ -283,11 +364,11 @@ impl<'a> Widget for DocumentWidget<'a> {
             doc,
             area,
             offset,
+            highlights,
             ..
         } = self;
         let line_height = ui.fonts().row_height(egui::TextStyle::Monospace);
         let char_width = ui.fonts().glyph_width(egui::TextStyle::Monospace, 'm');
-        let highlights = self.build_highlights();
         let available_rect = ui.available_rect_before_wrap();
         let top_left = available_rect.left_top();
         let mut paint_cursor = top_left;
@@ -297,11 +378,10 @@ impl<'a> Widget for DocumentWidget<'a> {
 
         let mut visual_x = 0u16;
         let mut line = 1u16;
-        let painter = ui.painter();
         // Render gutter
         paint_cursor += Vec2::RIGHT * char_width * (5 - dumb_log(line + area.y)) as f32;
 
-        painter.text(
+        ui.painter().text(
             paint_cursor,
             egui::Align2::LEFT_TOP,
             line + area.y,
@@ -344,13 +424,21 @@ impl<'a> Widget for DocumentWidget<'a> {
                                 let style = spans.iter().fold(text_style, |acc, span| {
                                     acc.patch(theme.highlight(span.0))
                                 });
-                                let res = painter.text(
+                                let res = ui.painter().text(
                                     paint_cursor,
                                     egui::Align2::LEFT_TOP,
                                     trimmed,
                                     egui::TextStyle::Monospace,
                                     style.fg.map(convert_color).unwrap_or(Color32::WHITE),
                                 );
+                                if style.add_modifier.contains(Modifier::REVERSED) {
+                                    if let Some(fg) = style.fg.map(convert_color) {
+                                        ui.painter().rect_filled(res, 0., fg);
+                                    }
+                                }
+                                if let Some(bg) = style.bg.map(convert_color) {
+                                    ui.painter().rect_filled(res, 0., dbg!(bg));
+                                }
                                 paint_cursor += Vec2::RIGHT * res.width();
 
                                 // There's probably some graphene stuff I'm botching here
@@ -373,7 +461,7 @@ impl<'a> Widget for DocumentWidget<'a> {
                             paint_cursor +=
                                 Vec2::RIGHT * char_width * (5 - dumb_log(line_number)) as f32;
 
-                            painter.text(
+                            ui.painter().text(
                                 paint_cursor,
                                 egui::Align2::LEFT_TOP,
                                 line_number,
